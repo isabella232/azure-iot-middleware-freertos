@@ -1,39 +1,44 @@
-/* Copyright (c) Microsoft Corporation.
- * Licensed under the MIT License. */
+/* Copyright (c) Microsoft Corporation. All rights reserved. */
+/* SPDX-License-Identifier: MIT */
 
 #include "e2e_device_process_commands.h"
 
+#include "azure_iot_json_writer.h"
+#include "azure_iot_hub_client_properties.h"
 #include "azure/core/az_json.h"
 #include "azure/core/az_span.h"
 
-#define e2etestMESSAGE_BUFFER_SIZE                           ( 10240 )
+#define e2etestMESSAGE_BUFFER_SIZE                             ( 10240 )
 
-#define e2etestPROCESS_LOOP_WAIT_TIMEOUT_IN_SEC              ( 4 )
+#define e2etestPROCESS_LOOP_WAIT_TIMEOUT_IN_SEC                ( 4 )
 
-#define e2etestE2E_TEST_SUCCESS                              ( 0 )
-#define e2etestE2E_TEST_FAILED                               ( 1 )
-#define e2etestE2E_TEST_NOT_FOUND                            ( 2 )
+#define e2etestE2E_TEST_SUCCESS                                ( 0 )
+#define e2etestE2E_TEST_FAILED                                 ( 1 )
+#define e2etestE2E_TEST_NOT_FOUND                              ( 2 )
 
-#define e2etestE2E_HMAC_MAX_SIZE                             ( 32 )
+#define e2etestE2E_HMAC_MAX_SIZE                               ( 32 )
 
-#define e2etestMETHOD_KEY                                    "method"
-#define e2etestPAYLOAD_KEY                                   "payload"
-#define e2etestPROPERTIES_KEY                                "properties"
-#define e2etestID_SCOPE_KEY                                  "id_scope"
-#define e2etestREGISTRATION_ID_KEY                           "registration_id"
-#define e2etestSYMMETRIC_KEY                                 "symmetric_key"
-#define e2etestSERVICE_ENDPOINT_KEY                          "service_endpoint"
-#define e2etestDESIRED_PROPERTY_KEY                          "desired_property_key"
-#define e2etestDESIRED_PROPERTY_VALUE                        "desired_property_value"
+#define e2etestMETHOD_KEY                                      "method"
+#define e2etestPAYLOAD_KEY                                     "payload"
+#define e2etestPROPERTIES_KEY                                  "properties"
+#define e2etestID_SCOPE_KEY                                    "id_scope"
+#define e2etestREGISTRATION_ID_KEY                             "registration_id"
+#define e2etestSYMMETRIC_KEY                                   "symmetric_key"
+#define e2etestSERVICE_ENDPOINT_KEY                            "service_endpoint"
+#define e2etestDESIRED_PROPERTY_KEY                            "desired_property_key"
+#define e2etestDESIRED_PROPERTY_VALUE                          "desired_property_value"
+#define e2etestCOMPONENT_KEY                                   "component"
 
-#define e2etestE2E_TEST_SEND_TELEMETRY_COMMAND               "send_telemetry"
-#define e2etestE2E_TEST_ECHO_COMMAND                         "echo"
-#define e2etestE2E_TEST_EXIT_COMMAND                         "exit"
-#define e2etestE2E_TEST_DEVICE_PROVISIONING_COMMAND          "device_provisioning"
-#define e2etestE2E_TEST_REPORTED_PROPERTIES_COMMAND          "reported_properties"
-#define e2etestE2E_TEST_VERIFY_DESIRED_PROPERTIES_COMMAND    "verify_desired_properties"
-#define e2etestE2E_TEST_GET_TWIN_PROPERTIES_COMMAND          "get_twin_properties"
-#define e2etestE2E_TEST_CONNECTED_MESSAGE                    "\"CONNECTED\""
+#define e2etestE2E_TEST_SEND_TELEMETRY_COMMAND                 "send_telemetry"
+#define e2etestE2E_TEST_ECHO_COMMAND                           "echo"
+#define e2etestE2E_TEST_EXIT_COMMAND                           "exit"
+#define e2etestE2E_TEST_DEVICE_PROVISIONING_COMMAND            "device_provisioning"
+#define e2etestE2E_TEST_REPORTED_PROPERTIES_COMMAND            "reported_properties"
+#define e2etestE2E_TEST_VERIFY_DESIRED_PROPERTIES_COMMAND      "verify_desired_properties"
+#define e2etestE2E_TEST_GET_TWIN_PROPERTIES_COMMAND            "get_twin_properties"
+#define e2etestE2E_TEST_CONNECTED_MESSAGE                      "\"CONNECTED\""
+#define e2etestE2E_TEST_WRITEABLE_PROPERTY_RESPONSE_COMMAND    "get_writable_properties_response"
+#define e2etestE2E_TEST_COMPONENT_REPORTED_PROPERTY_COMMAND    "report_component_properties"
 
 #define RETURN_IF_FAILED( e, msg )                    \
     if( e != e2etestE2E_TEST_SUCCESS )                \
@@ -781,6 +786,150 @@ static uint32_t prvE2ETestVerifyDesiredPropertiesCommandExecute( E2E_TEST_COMMAN
 /*-----------------------------------------------------------*/
 
 /**
+ * Execute Writeable property response command
+ *
+ * e.g of command issued from service:
+ *   {"method":"get_writable_properties_repsonse","desired_property_key":"temp","desired_property_value":"7664262703"}
+ *
+ **/
+static uint32_t prvE2ETestWriteablePropertyResponseCommandExecute( E2E_TEST_COMMAND_HANDLE xCMD,
+                                                                   AzureIoTHubClient_t * pxAzureIoTHubClient )
+{
+    uint32_t ulStatus;
+    uint16_t usTelemetryPacketID;
+    uint32_t ulRequestId;
+    az_span xJsonSpan = az_span_create( ( uint8_t * ) xCMD->pulReceivedData, xCMD->ulReceivedDataLength );
+    az_span xKey = az_span_create( ucScratchBuffer, e2etestMESSAGE_BUFFER_SIZE / 3 );
+    az_span xValue = az_span_create( ucScratchBuffer + e2etestMESSAGE_BUFFER_SIZE / 3, e2etestMESSAGE_BUFFER_SIZE / 3 );
+    az_span xValueReceived = az_span_create( ucScratchBuffer + 2 * e2etestMESSAGE_BUFFER_SIZE / 3, e2etestMESSAGE_BUFFER_SIZE / 3 );
+    AzureIoTJSONWriter_t xJSONWriter;
+
+    ulStatus = prvGetValueForKey( xJsonSpan, e2etestDESIRED_PROPERTY_KEY, &xKey );
+    RETURN_IF_FAILED( ulStatus, "failed to find desired_property_key!" );
+
+    ulStatus = prvGetValueForKey( xJsonSpan, e2etestDESIRED_PROPERTY_VALUE, &xValue );
+    RETURN_IF_FAILED( ulStatus, "failed to find desired_property_value!" );
+
+    if( ( AzureIoTJSONWriter_Init( &xJSONWriter, ucScratchBuffer2,
+                                   sizeof( ucScratchBuffer2 ) ) != eAzureIoTSuccess ) ||
+        ( AzureIoTJSONWriter_AppendBeginObject( &xJSONWriter ) != eAzureIoTSuccess ) ||
+        ( AzureIoTHubClientProperties_BuilderBeginResponseStatus( pxAzureIoTHubClient,
+                                                                  &xJSONWriter,
+                                                                  az_span_ptr( xKey ),
+                                                                  az_span_size( xKey ),
+                                                                  200, 1, NULL, 0 ) != eAzureIoTSuccess ) ||
+        ( AzureIoTJSONWriter_AppendString( &xJSONWriter,
+                                           az_span_ptr( xValue ),
+                                           ( uint32_t ) az_span_size( xValue ) ) != eAzureIoTSuccess ) ||
+        ( AzureIoTHubClientProperties_BuilderEndResponseStatus( pxAzureIoTHubClient,
+                                                                &xJSONWriter ) != eAzureIoTSuccess ) ||
+        ( AzureIoTJSONWriter_AppendEndObject( &xJSONWriter ) != eAzureIoTSuccess ) )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "Failed to build response with status" );
+    }
+    else if( AzureIoTHubClient_SendPropertiesReported( pxAzureIoTHubClient,
+                                                       ucScratchBuffer2,
+                                                       ( uint32_t ) AzureIoTJSONWriter_GetBytesUsed( &xJSONWriter ),
+                                                       &ulRequestId ) != eAzureIoTSuccess )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "Failed to send reported properties" );
+    }
+    else if( AzureIoTHubClient_ProcessLoop( pxAzureIoTHubClient,
+                                            e2etestPROCESS_LOOP_WAIT_TIMEOUT_IN_SEC ) != eAzureIoTSuccess )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "recevice timeout" );
+    }
+    else if( AzureIoTHubClient_SendTelemetry( pxAzureIoTHubClient,
+                                              xCMD->pulReceivedData,
+                                              xCMD->ulReceivedDataLength,
+                                              NULL, eAzureIoTHubMessageQoS1, &usTelemetryPacketID ) != eAzureIoTSuccess )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "Failed to send response" );
+    }
+    else if( ( prvWaitForPuback( pxAzureIoTHubClient, usTelemetryPacketID ) ) )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "Telemetry message PUBACK never received!" );
+    }
+
+    return e2etestE2E_TEST_SUCCESS;
+}
+/*-----------------------------------------------------------*/
+
+/**
+ * Execute Report component properties command
+ *
+ * e.g of command issued from service:
+ *   {"method":"report_component_properties","component":"test","desired_property_key":"temp","desired_property_value":"7664262703"}
+ *
+ **/
+static uint32_t prvE2ETestReportComponentPropertiesCommandExecute( E2E_TEST_COMMAND_HANDLE xCMD,
+                                                                   AzureIoTHubClient_t * pxAzureIoTHubClient )
+{
+    uint32_t ulStatus;
+    uint16_t usTelemetryPacketID;
+    uint32_t ulRequestId;
+    az_span xJsonSpan = az_span_create( ( uint8_t * ) xCMD->pulReceivedData, xCMD->ulReceivedDataLength );
+    az_span xKey = az_span_create( ucScratchBuffer, e2etestMESSAGE_BUFFER_SIZE / 3 );
+    az_span xValue = az_span_create( ucScratchBuffer + e2etestMESSAGE_BUFFER_SIZE / 3, e2etestMESSAGE_BUFFER_SIZE / 3 );
+    az_span xComponent = az_span_create( ucScratchBuffer + 2 * e2etestMESSAGE_BUFFER_SIZE / 3, e2etestMESSAGE_BUFFER_SIZE / 3 );
+    AzureIoTJSONWriter_t xJSONWriter;
+
+    ulStatus = prvGetValueForKey( xJsonSpan, e2etestCOMPONENT_KEY, &xComponent );
+    RETURN_IF_FAILED( ulStatus, "failed to find component!" );
+
+    ulStatus = prvGetValueForKey( xJsonSpan, e2etestDESIRED_PROPERTY_KEY, &xKey );
+    RETURN_IF_FAILED( ulStatus, "failed to find desired_property_key!" );
+
+    ulStatus = prvGetValueForKey( xJsonSpan, e2etestDESIRED_PROPERTY_VALUE, &xValue );
+    RETURN_IF_FAILED( ulStatus, "failed to find desired_property_value!" );
+
+    if( ( AzureIoTJSONWriter_Init( &xJSONWriter, ucScratchBuffer2,
+                                   sizeof( ucScratchBuffer2 ) ) != eAzureIoTSuccess ) ||
+        ( AzureIoTJSONWriter_AppendBeginObject( &xJSONWriter ) != eAzureIoTSuccess ) ||
+        ( AzureIoTHubClientProperties_BuilderBeginComponent( pxAzureIoTHubClient,
+                                                             &xJSONWriter,
+                                                             az_span_ptr( xComponent ),
+                                                             az_span_size( xComponent ) ) != eAzureIoTSuccess ) ||
+        ( AzureIoTJSONWriter_AppendPropertyWithStringValue( &xJSONWriter,
+                                                            az_span_ptr( xKey ),
+                                                            ( uint32_t ) az_span_size( xKey ),
+                                                            az_span_ptr( xValue ),
+                                                            ( uint32_t ) az_span_size( xValue ) ) != eAzureIoTSuccess ) ||
+        ( AzureIoTHubClientProperties_BuilderEndComponent( pxAzureIoTHubClient,
+                                                           &xJSONWriter ) != eAzureIoTSuccess ) ||
+        ( AzureIoTJSONWriter_AppendEndObject( &xJSONWriter ) != eAzureIoTSuccess ) )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "Failed to build reported property" );
+    }
+    else if( AzureIoTHubClient_SendPropertiesReported( pxAzureIoTHubClient,
+                                                       ucScratchBuffer2,
+                                                       ( uint32_t ) AzureIoTJSONWriter_GetBytesUsed( &xJSONWriter ),
+                                                       &ulRequestId ) != eAzureIoTSuccess )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "Failed to send reported properties" );
+    }
+    else if( AzureIoTHubClient_ProcessLoop( pxAzureIoTHubClient,
+                                            e2etestPROCESS_LOOP_WAIT_TIMEOUT_IN_SEC ) != eAzureIoTSuccess )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "recevice timeout" );
+    }
+    else if( AzureIoTHubClient_SendTelemetry( pxAzureIoTHubClient,
+                                              xCMD->pulReceivedData,
+                                              xCMD->ulReceivedDataLength,
+                                              NULL, eAzureIoTHubMessageQoS1, &usTelemetryPacketID ) != eAzureIoTSuccess )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "Failed to send response" );
+    }
+    else if( ( prvWaitForPuback( pxAzureIoTHubClient, usTelemetryPacketID ) ) )
+    {
+        RETURN_IF_FAILED( e2etestE2E_TEST_FAILED, "Telemetry message PUBACK never received!" );
+    }
+
+    return e2etestE2E_TEST_SUCCESS;
+}
+/*-----------------------------------------------------------*/
+
+/**
  * Initialize device command
  *
  **/
@@ -860,6 +1009,18 @@ static uint32_t prvE2ETestInitializeCMD( const char * pcMethodName,
     {
         ulStatus = prvE2EDeviceCommandInit( xCMD, ucData, ulDataLength,
                                             prvE2ETestVerifyDesiredPropertiesCommandExecute );
+    }
+    else if( !strncmp( e2etestE2E_TEST_WRITEABLE_PROPERTY_RESPONSE_COMMAND,
+                       pcMethodName, sizeof( e2etestE2E_TEST_WRITEABLE_PROPERTY_RESPONSE_COMMAND ) - 1 ) )
+    {
+        ulStatus = prvE2EDeviceCommandInit( xCMD, ucData, ulDataLength,
+                                            prvE2ETestWriteablePropertyResponseCommandExecute );
+    }
+    else if( !strncmp( e2etestE2E_TEST_COMPONENT_REPORTED_PROPERTY_COMMAND,
+                       pcMethodName, sizeof( e2etestE2E_TEST_COMPONENT_REPORTED_PROPERTY_COMMAND ) - 1 ) )
+    {
+        ulStatus = prvE2EDeviceCommandInit( xCMD, ucData, ulDataLength,
+                                            prvE2ETestReportComponentPropertiesCommandExecute );
     }
     else
     {
